@@ -1,0 +1,81 @@
+--- dist/mcp/mcp-server.js
++++ dist/mcp/mcp-server.js
+@@ -1,6 +1,6 @@
+ "use strict";
+ Object.defineProperty(exports, "__esModule", { value: true });
+-exports.getMcpServer = exports.mcpServer = void 0;
++exports.createMcpServer = exports.getMcpServer = exports.mcpServer = void 0;
+ const index_js_1 = require("@modelcontextprotocol/sdk/server/index.js");
+ const register_tools_1 = require("./register-tools");
+ exports.mcpServer = null;
+@@ -20,4 +20,19 @@
+     return exports.mcpServer;
+ };
+ exports.getMcpServer = getMcpServer;
++// An SDK Server can only be bound to one transport, so a shared instance makes
++// every session after the first fail with "Already connected to a transport".
++const createMcpServer = () => {
++    const server = new index_js_1.Server({
++        name: 'ChromeMcpServer',
++        version: '1.0.0',
++    }, {
++        capabilities: {
++            tools: {},
++        },
++    });
++    (0, register_tools_1.setupTools)(server);
++    return server;
++};
++exports.createMcpServer = createMcpServer;
+ //# sourceMappingURL=mcp-server.js.map
+\ No newline at end of file
+--- dist/server/index.js
++++ dist/server/index.js
+@@ -142,7 +142,10 @@
+                 reply.raw.on('close', () => {
+                     this.transportsMap.delete(transport.sessionId);
+                 });
+-                const server = (0, mcp_server_1.getMcpServer)();
++                const server = (0, mcp_server_1.createMcpServer)();
++                transport.onclose = () => {
++                    void server.close();
++                };
+                 await server.connect(transport);
+                 reply.raw.write(':\n\n');
+             }
+@@ -186,12 +189,14 @@
+                         }
+                     },
+                 });
++                const sessionServer = (0, mcp_server_1.createMcpServer)();
+                 transport.onclose = () => {
+                     if ((transport === null || transport === void 0 ? void 0 : transport.sessionId) && this.transportsMap.get(transport.sessionId)) {
+                         this.transportsMap.delete(transport.sessionId);
+                     }
++                    void sessionServer.close();
+                 };
+-                await (0, mcp_server_1.getMcpServer)().connect(transport);
++                await sessionServer.connect(transport);
+             }
+             else {
+                 reply.code(constant_1.HTTP_STATUS.BAD_REQUEST).send({ error: constant_1.ERROR_MESSAGES.INVALID_MCP_REQUEST });
+@@ -218,15 +223,12 @@
+                 reply.code(constant_1.HTTP_STATUS.BAD_REQUEST).send({ error: constant_1.ERROR_MESSAGES.INVALID_SSE_SESSION });
+                 return;
+             }
+-            reply.raw.setHeader('Content-Type', 'text/event-stream');
+-            reply.raw.setHeader('Cache-Control', 'no-cache');
+-            reply.raw.setHeader('Connection', 'keep-alive');
+-            reply.raw.flushHeaders();
++            // Hand the socket to the SDK transport before it writes SSE headers.
++            // Pre-flushing headers here made handleRequest throw ERR_HTTP_HEADERS_SENT,
++            // killing the stream on every connect.
++            reply.hijack();
+             try {
+                 await transport.handleRequest(request.raw, reply.raw);
+-                if (!reply.sent) {
+-                    reply.hijack();
+-                }
+             }
+             catch (error) {
+                 if (!reply.raw.writableEnded) {
