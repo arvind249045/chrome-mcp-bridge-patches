@@ -13,6 +13,7 @@ dev = ["pytest>=8", "anyio>=4"]
 
 [project.scripts]
 android-mcp = "android_mcp.server:main"
+android-mcp-selfcheck = "android_mcp.selfcheck:main"
 
 [build-system]
 requires = ["hatchling"]

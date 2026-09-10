@@ -217,24 +217,46 @@ user while the point here is to act on the others. Note that `read_screen` and
 everything else only ever sees the *current* profile, so switch before driving a
 newly provisioned one.
 
+## Checking it against a real device
+
+Everything here is tested against fakes, which proves the logic and proves
+nothing about an actual phone. This closes that gap:
+
+```bash
+python -m android_mcp.selfcheck                 # read-only
+python -m android_mcp.selfcheck --tap Settings  # also covers the acting path
+```
+
+It walks the stack in stages — adb sees a device, uiautomator2 connects, the
+hierarchy is readable, the screen settles, the profile tools work — and stops at
+the first blocking failure so one root cause does not print as six errors. Each
+stage says what a failure probably means rather than just that it happened.
+
+The hierarchy stage reports the real compression ratio on whatever is on your
+screen, so the 4.6% above is a fixture measurement you can check against your own
+apps, along with how many elements actually carry a `resource_id` — which is the
+assumption the selector ranking rests on.
+
 ## Tests
 
 ```bash
 pytest
 ```
 
-247 tests, none needing a device. The parsing, selector-ranking, flow and `pm`
+271 tests, none needing a device. The parsing, selector-ranking, flow and `pm`
 output logic is pure functions; the action layer and replay engine run against a
 scripted fake device and a fake clock; profile operations run against a fake adb
-shell that records what it was asked to run; and the MCP tools are driven
-end-to-end through `call_tool`, including a record-save-replay round trip. The
+shell that records what it was asked to run; the self-check's stages run against
+injected fakes; and the MCP tools are driven end-to-end through `call_tool`,
+including a record-save-replay round trip. The
 server tests skip if the MCP SDK is not installed, so the core suite runs
 anywhere.
 
 ## Status
 
 Every layer is covered by tests, but none of it has run against a physical device
-or a live BlueStacks instance yet — there is no Android available where this was
+or a live BlueStacks instance yet — run the self-check above first, which is
+built precisely to tell you what holds — there is no Android available where this was
 built. The untested seams are the ones that touch hardware: uiautomator2's
 `dump_hierarchy` output on a real app versus the fixtures here, IME behaviour for
 `type_text`, the exact `pm` output formats across Android versions, and how
