@@ -77,6 +77,7 @@ class FakeDevice:
         activity: str = ".MainActivity",
         size=WINDOW,
         then=None,
+        sequence=None,
     ):
         self.serial = "fake:5555"
         self._reads = list(reads) or [screen()]
@@ -84,6 +85,9 @@ class FakeDevice:
         self._activity = activity
         self._size = size
         self._then = list(then) if then else None
+        # One entry consumed per action, for walking a multi-step flow. An entry
+        # is a dump, or a (dump, package) pair when the step changes app.
+        self._sequence = list(sequence) if sequence else []
         self.dumps = 0
         self.clicks: list[tuple[int, int]] = []
         self.long_clicks: list[tuple[int, int]] = []
@@ -113,6 +117,13 @@ class FakeDevice:
         if self._then is not None:
             self._reads = list(self._then)
             self._then = None
+        if self._sequence:
+            nxt = self._sequence.pop(0)
+            if isinstance(nxt, tuple):
+                dump, self._package = nxt
+            else:
+                dump = nxt
+            self._reads = [dump]
 
     def click(self, x, y):
         self.clicks.append((x, y))

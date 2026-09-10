@@ -3,9 +3,8 @@
 An MCP server for driving an Android device or a BlueStacks instance, built so a
 model can work the screen cheaply and without guessing.
 
-This is the foundation layer: device discovery, reading the screen, and acting on
-it. Recorded flows sit on top of it and are not here yet — see
-[Next](#next).
+Two layers: primitives for reading and acting on the screen, and recorded flows
+that replay a path through an app deterministically, with no model in the loop.
 
 ## Why it is shaped like this
 
@@ -111,6 +110,17 @@ which takes a few seconds once per device.
 | `press_key` | back, home, recent, enter, … |
 | `screenshot` | PNG, for screens the hierarchy cannot describe |
 
+Recording and replay:
+
+| Tool | What it does |
+| --- | --- |
+| `start_recording` | Begin capturing the actions that follow into a named flow |
+| `save_flow` | Save the recording, optionally turning typed text into parameters |
+| `cancel_recording` | Throw the recording away |
+| `list_flows` | List saved flows, or show one flow's steps |
+| `run_flow` | Replay a flow and report what each step did |
+| `delete_flow` | Delete a saved flow |
+
 Prefer `text`, `resource_id` or `desc` over `index`. Text matching is
 case-insensitive and partial; an exact label beats a partial one and a tappable
 match beats an inert one, so the common ambiguities resolve themselves. Genuine
@@ -130,25 +140,68 @@ A few behaviours worth knowing:
   and non-ASCII survive. If typing silently does nothing, that is where to look.
 - Tapping a disabled control is refused rather than sent and lost.
 
+## Flows
+
+Having a model reason through twenty taps every morning is slow, costly and
+nondeterministic. Do it once and save it:
+
+```
+start_recording("order-usual")
+  ... carry the flow out with the tools above ...
+save_flow(description="the usual lunch", parameters={"dish": "Paneer Roll"})
+```
+
+Then `run_flow("order-usual", params={"dish": "Cold Coffee"})` replays it with no
+reasoning per step. Flows are one JSON file each under `~/.android-mcp/flows`
+(override with `ANDROID_MCP_FLOWS`), so they can be read, edited and diffed.
+
+**What makes a flow survive next week's app update.** Each step stores several
+ways to find its element, ranked by how likely they are to still be true:
+
+1. `resource_id` — set in code, survives copy edits and translation
+2. `content-desc` — an accessibility label, usually steadier than visible copy
+3. exact text — precise, but breaks on any wording change
+4. the *stable part* of the text — `"Paneer Roll · ₹99"` also stores
+   `"Paneer Roll"`, because the price will change and the dish name will not
+5. class plus stable text — for when the same words appear twice
+
+Replay takes the first that hits. A step that only matched on a later selector is
+reported as `healed`; pass `heal=true` to promote the one that worked so the
+drift is recorded rather than rediscovered daily.
+
+**Two deliberate refusals.** Replay never falls back to a recorded *index* — a
+position is meaningless on a screen that gained a banner, and tapping the wrong
+row is worse than stopping. And a run stops at the first step that fails rather
+than carrying on, because continuing past a failed tap is how an automated run
+does something nobody asked for. Either way the failure report names the step and
+shows the screen, so a model can repair the flow.
+
+Each step also records where it happened — the expected package, plus a few
+anchor labels chosen to avoid anything with a number in it, so a cart total or a
+delivery estimate never becomes the thing replay depends on. If the screen in
+front of a step is not the one it was recorded on, the step fails before acting.
+
 ## Tests
 
 ```bash
 pytest
 ```
 
-104 tests, no device needed. The parsing and selector logic is pure functions
-over XML, the action layer runs against a scripted fake device and a fake clock,
-and the MCP tools are driven end-to-end through `call_tool`. The server tests
-skip if the MCP SDK is not installed, so the core suite runs anywhere.
+196 tests, none needing a device. The parsing, selector-ranking and flow logic is
+pure functions; the action layer and the replay engine run against a scripted
+fake device and a fake clock; the MCP tools are driven end-to-end through
+`call_tool`, including a record-save-replay round trip. The server tests skip if
+the MCP SDK is not installed, so the core suite runs anywhere.
 
-## Next
+## Status
 
-The piece that makes a daily assistant actually work is not here yet: recording
-a successful path once as a selector sequence and replaying it deterministically,
-with the model re-entering only when a selector misses. Replay is fast and gives
-the same answer every time; having a model reason through twenty taps every
-morning is neither. The tools above are the primitives that a recorder would
-capture and a player would replay.
+Every layer is covered by tests, but none of it has run against a physical device
+or a live BlueStacks instance yet — there is no Android available where this was
+built. The untested seams are the ones that touch hardware: uiautomator2's
+`dump_hierarchy` output on a real app versus the fixtures here, IME behaviour for
+`type_text`, and how stable `resource_id`s actually are across real app updates,
+which is the assumption the whole selector ranking rests on. Expect to adjust
+that ranking once there is evidence.
 
 ## Scope
 

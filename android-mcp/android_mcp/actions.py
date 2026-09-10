@@ -264,6 +264,29 @@ def locate(elements: list[Element], selector: Selector) -> Element | None:
         return None
 
 
+def as_selectors(selector: Selector | list[Selector]) -> list[Selector]:
+    return list(selector) if isinstance(selector, list) else [selector]
+
+
+def locate_any(
+    elements: list[Element], selectors: list[Selector]
+) -> tuple[Selector, Element] | None:
+    """First selector in the list that resolves, with what it resolved to.
+
+    Order is significance: a replayed step ranks its selectors most durable
+    first, so the winner also tells us whether the flow has drifted.
+    """
+    for selector in selectors:
+        found = locate(elements, selector)
+        if found is not None:
+            return selector, found
+    return None
+
+
+def describe_selectors(selectors: list[Selector]) -> str:
+    return " or ".join(s.describe() for s in selectors)
+
+
 # --------------------------------------------------------------------------
 # acting
 # --------------------------------------------------------------------------
@@ -321,9 +344,12 @@ def tap(
     long: bool = False,
     expect_state: str | None = None,
     settling: Settle | None = None,
+    observe=None,
 ) -> Snapshot:
     settling = settling or Settle()
-    element, _ = _resolve_for_action(device, selector, expect_state, settling)
+    element, before = _resolve_for_action(device, selector, expect_state, settling)
+    if observe is not None:
+        observe(element, before)
     if not element.enabled:
         raise ActionError(
             f"{element.render()} is disabled, so tapping it would do nothing."
@@ -345,6 +371,7 @@ def type_text(
     submit: bool = False,
     expect_state: str | None = None,
     settling: Settle | None = None,
+    observe=None,
 ) -> Snapshot:
     """Focus a field and type into it.
 
@@ -352,7 +379,9 @@ def type_text(
     and anything non-ASCII.
     """
     settling = settling or Settle()
-    element, _ = _resolve_for_action(device, selector, expect_state, settling)
+    element, before = _resolve_for_action(device, selector, expect_state, settling)
+    if observe is not None:
+        observe(element, before)
     x, y = element.bounds.center
     device.click(x, y)
     settle(device, **settling.kwargs())
@@ -399,7 +428,7 @@ def swipe(
 
 def scroll_until(
     device: AndroidDevice,
-    selector: Selector,
+    selector: Selector | list[Selector],
     *,
     direction: str = "down",
     max_swipes: int = 8,
@@ -412,29 +441,30 @@ def scroll_until(
     and hoping.
     """
     settling = settling or Settle()
+    wanted = as_selectors(selector)
     current = settle(device, **settling.kwargs())
-    if locate(current.elements, selector):
+    if locate_any(current.elements, wanted):
         return current
 
     for _ in range(max_swipes):
         before = current.state_id
         current = swipe(device, direction, settling=settling)
-        if locate(current.elements, selector):
+        if locate_any(current.elements, wanted):
             return current
         if current.state_id == before:
             raise ElementNotFound(
                 f"reached the end of the list without finding "
-                f"{selector.describe()}.\n{current.render()}"
+                f"{describe_selectors(wanted)}.\n{current.render()}"
             )
     raise ElementNotFound(
-        f"{selector.describe()} not found after {max_swipes} swipes "
+        f"{describe_selectors(wanted)} not found after {max_swipes} swipes "
         f"{direction}.\n{current.render()}"
     )
 
 
 def wait_for(
     device: AndroidDevice,
-    selector: Selector,
+    selector: Selector | list[Selector],
     *,
     timeout: float = 10.0,
     interval: float = DEFAULT_POLL_INTERVAL,
@@ -442,17 +472,18 @@ def wait_for(
     clock=time.monotonic,
     sleep=time.sleep,
 ) -> Snapshot:
-    """Poll until the element is on screen."""
+    """Poll until any of the selectors is on screen."""
     settling = settling or Settle()
+    wanted = as_selectors(selector)
     deadline = clock() + timeout
     while True:
         current = settle(device, **settling.kwargs())
-        if locate(current.elements, selector):
+        if locate_any(current.elements, wanted):
             return current
         if clock() >= deadline:
             raise ElementNotFound(
-                f"{selector.describe()} did not appear within {timeout}s.\n"
-                f"{current.render()}"
+                f"{describe_selectors(wanted)} did not appear within "
+                f"{timeout}s.\n{current.render()}"
             )
         sleep(interval)
 

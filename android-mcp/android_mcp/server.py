@@ -13,13 +13,19 @@ Design notes, because the shape of this surface is the whole point:
 * There is no implicit "current device". Tools take ``serial``, defaulted only
   when exactly one device is attached, so a multi-instance setup cannot quietly
   drive the wrong emulator.
+* A flow done daily should not be re-reasoned daily. Record it once and replay
+  it deterministically; the model re-enters only when a step misses.
 """
 
 from __future__ import annotations
 
-from . import actions
-from .actions import ActionError, Selector
+from pathlib import Path
+
+from . import actions, player
+from .actions import ActionError, Selector, Snapshot
 from .device import DeviceError, DeviceRegistry, connect_bluestacks, list_devices
+from .flows import FlowError, FlowStore
+from .recorder import Recorder
 
 try:  # pragma: no cover - import shape differs across SDK majors
     from mcp.server.mcpserver import Image, MCPServer
@@ -46,20 +52,28 @@ underneath you.
 
 Every tool returns the screen after the action has settled. If a header says
 NOT SETTLED or BUSY, the screen was still moving when time ran out.
+
+For anything done more than once, record it: start_recording, carry the flow out
+with these tools, then save_flow. run_flow replays it deterministically, which is
+much faster and more reliable than reasoning through the taps again.
 """
 
 
 def build_server(
-    name: str = "android-mcp", registry: DeviceRegistry | None = None
+    name: str = "android-mcp",
+    registry: DeviceRegistry | None = None,
+    flow_dir: Path | str | None = None,
 ) -> MCPServer:
-    """Build a server with its own device registry.
+    """Build a server with its own device registry, recorder and flow store.
 
-    The registry is per-instance on purpose: shared mutable state across
-    sessions is the bug this repository's parent patch set exists to fix. Pass
-    one in to reuse already-open connections, or to drive fakes in tests.
+    All three are per-instance on purpose: shared mutable state across sessions
+    is the bug this repository's parent patch set exists to fix, and two
+    sessions recording into one buffer would interleave into nonsense.
     """
     server = MCPServer(name=name, instructions=INSTRUCTIONS)
     registry = registry if registry is not None else DeviceRegistry()
+    store = FlowStore(flow_dir)
+    recorder = Recorder()
 
     def device_for(serial: str | None):
         try:
@@ -88,16 +102,32 @@ def build_server(
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
 
-    def act(fn, *args, **kwargs) -> str:
+    def act(fn, *args, **kwargs) -> Snapshot:
         """Run an action, turning our errors into tool errors.
 
         The messages already carry the current screen, so a model that guessed
         wrong can correct itself from the error alone.
         """
         try:
-            return fn(*args, **kwargs).render()
+            return fn(*args, **kwargs)
         except (ActionError, DeviceError) as exc:
             raise ToolError(str(exc)) from exc
+
+    def watching(action: str, options: dict | None = None):
+        """An observer that files the resolved element with the recorder."""
+
+        def observe(element, before):
+            recorder.note_element(action, element, before, options)
+
+        return observe
+
+    def record_found(action: str, screen: Snapshot, wanted, options: dict) -> None:
+        """Record a step whose element only appeared after waiting or scrolling."""
+        if not recorder.recording:
+            return
+        hit = actions.locate_any(screen.elements, actions.as_selectors(wanted))
+        if hit is not None:
+            recorder.note_element(action, hit[1], screen, options)
 
     # --- discovery -----------------------------------------------------
 
@@ -174,13 +204,17 @@ def build_server(
         need a separate read afterwards. If another app is in front when time
         runs out, the error says which.
         """
-        return act(
+        screen = act(
             actions.open_app,
             device_for(serial),
             package,
             activity=activity,
             timeout=timeout,
         )
+        recorder.note_action(
+            "open_app", {"package": package, "activity": activity or ""}
+        )
+        return screen.render()
 
     @server.tool()
     def tap(
@@ -209,7 +243,8 @@ def build_server(
             selector(index, text, resource_id, desc, exact=exact),
             long=long,
             expect_state=state_id,
-        )
+            observe=watching("tap", {"long": long} if long else {}),
+        ).render()
 
     @server.tool()
     def type_text(
@@ -230,6 +265,7 @@ def build_server(
         spaces and non-ASCII survive. By default it replaces what is there; set
         clear=False to append. Set submit to press enter afterwards.
         """
+        options = {"value": value, "clear": clear, "submit": submit}
         return act(
             actions.type_text,
             device_for(serial),
@@ -238,7 +274,8 @@ def build_server(
             clear=clear,
             submit=submit,
             expect_state=state_id,
-        )
+            observe=watching("type_text", options),
+        ).render()
 
     @server.tool()
     def swipe(
@@ -253,9 +290,13 @@ def build_server(
         screen the swipe covers, between 0 and 0.9.
         """
         try:
-            return act(actions.swipe, device_for(serial), direction, fraction=fraction)
+            screen = act(
+                actions.swipe, device_for(serial), direction, fraction=fraction
+            )
         except ValueError as exc:
             raise ToolError(str(exc)) from exc
+        recorder.note_action("swipe", {"direction": direction, "fraction": fraction})
+        return screen.render()
 
     @server.tool()
     def scroll_until(
@@ -272,13 +313,21 @@ def build_server(
         Stops early when the screen stops changing, which means the list has
         reached its end, rather than swiping max_swipes times pointlessly.
         """
-        return act(
+        wanted = selector(None, text, resource_id, desc, exact=exact)
+        screen = act(
             actions.scroll_until,
             device_for(serial),
-            selector(None, text, resource_id, desc, exact=exact),
+            wanted,
             direction=direction,
             max_swipes=max_swipes,
         )
+        record_found(
+            "scroll_until",
+            screen,
+            wanted,
+            {"direction": direction, "max_swipes": max_swipes},
+        )
+        return screen.render()
 
     @server.tool()
     def wait_for(
@@ -294,12 +343,10 @@ def build_server(
         For a screen you are expecting after a slow action. On timeout the error
         shows what is on screen instead, so you can see where the flow diverged.
         """
-        return act(
-            actions.wait_for,
-            device_for(serial),
-            selector(None, text, resource_id, desc, exact=exact),
-            timeout=timeout,
-        )
+        wanted = selector(None, text, resource_id, desc, exact=exact)
+        screen = act(actions.wait_for, device_for(serial), wanted, timeout=timeout)
+        record_found("wait_for", screen, wanted, {"timeout": timeout})
+        return screen.render()
 
     @server.tool()
     def press_key(key: str, serial: str | None = None) -> str:
@@ -307,7 +354,127 @@ def build_server(
 
         Common keys: back, home, recent, enter, delete, search, volume_up.
         """
-        return act(actions.press, device_for(serial), key)
+        screen = act(actions.press, device_for(serial), key)
+        recorder.note_action("press_key", {"key": key})
+        return screen.render()
+
+    # --- flows ---------------------------------------------------------
+
+    @server.tool()
+    def start_recording(name: str) -> str:
+        """Start recording the actions that follow into a named flow.
+
+        Carry the flow out once with the tools above, then call save_flow. Every
+        action that succeeds is captured with several ways to find its element,
+        so replay survives the app moving things around.
+        """
+        try:
+            recorder.start(name)
+        except FlowError as exc:
+            raise ToolError(str(exc)) from exc
+        return (
+            f"recording {name!r}. Carry out the flow now, then call save_flow. "
+            "cancel_recording throws it away."
+        )
+
+    @server.tool()
+    def save_flow(
+        description: str = "",
+        parameters: dict[str, str] | None = None,
+    ) -> str:
+        """Save what was recorded as a replayable flow.
+
+        parameters turns text that was typed into placeholders, so one recording
+        serves many runs: {"dish": "Paneer Roll"} rewrites that literal to
+        {{dish}}, and run_flow then takes dish= as an argument.
+        """
+        try:
+            flow = recorder.save(description, parameters)
+            path = store.save(flow)
+        except FlowError as exc:
+            raise ToolError(str(exc)) from exc
+        return f"saved {flow.name!r} to {path}\n\n{flow.describe()}"
+
+    @server.tool()
+    def cancel_recording() -> str:
+        """Throw away the recording in progress without saving it.
+
+        Use this when a recording went wrong part way through; start_recording
+        again for a clean attempt.
+        """
+        name = recorder.cancel()
+        return f"discarded the recording of {name!r}" if name else "was not recording"
+
+    @server.tool()
+    def list_flows(name: str | None = None) -> str:
+        """List saved flows, or show one flow's steps when given a name."""
+        try:
+            if name:
+                return store.load(name).describe()
+            names = store.names()
+            if not names:
+                return (
+                    f"no flows saved yet in {store.directory}. Record one with "
+                    "start_recording."
+                )
+            lines = []
+            for saved in names:
+                try:
+                    flow = store.load(saved)
+                except FlowError as exc:
+                    lines.append(f"{saved}  (unreadable: {exc})")
+                    continue
+                summary = f"{saved}  ({len(flow.steps)} steps)"
+                if flow.params:
+                    summary += f"  takes: {', '.join(flow.params)}"
+                if flow.description:
+                    summary += f"  - {flow.description}"
+                lines.append(summary)
+            return "\n".join(lines)
+        except FlowError as exc:
+            raise ToolError(str(exc)) from exc
+
+    @server.tool()
+    def run_flow(
+        name: str,
+        params: dict[str, str] | None = None,
+        serial: str | None = None,
+        heal: bool = False,
+    ) -> str:
+        """Replay a saved flow and report what each step did.
+
+        Deterministic: no reasoning per step. Each step tries its selectors in
+        order of durability, and the run stops at the first step that fails
+        rather than carrying on past it. A step that only matched on a later
+        selector is reported as healed; pass heal=true to write the selector that
+        worked back into the flow.
+        """
+        try:
+            flow = store.load(name)
+        except FlowError as exc:
+            raise ToolError(str(exc)) from exc
+        device = device_for(serial)
+        try:
+            result = player.run(
+                device, flow, params=params, heal=heal, store=store
+            )
+        except FlowError as exc:
+            raise ToolError(str(exc)) from exc
+        if not result.ok:
+            raise ToolError(result.render())
+        return result.render()
+
+    @server.tool()
+    def delete_flow(name: str) -> str:
+        """Delete a saved flow permanently.
+
+        Its JSON file is removed from the flow directory.
+        """
+        try:
+            store.delete(name)
+        except FlowError as exc:
+            raise ToolError(str(exc)) from exc
+        return f"deleted {name!r}"
 
     return server
 
