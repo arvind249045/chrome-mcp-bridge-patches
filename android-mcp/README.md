@@ -7,6 +7,55 @@ Three layers: primitives for reading and acting on the screen, recorded flows
 that replay a path through an app deterministically, and user-profile
 provisioning so a fresh profile is one command instead of ten minutes.
 
+## Get it running
+
+On the machine with BlueStacks or the phone. Five minutes.
+
+**1. Get the code**
+
+```powershell
+git clone https://github.com/arvind249045/chrome-mcp-bridge-patches.git
+cd chrome-mcp-bridge-patches
+git checkout claude/bluestacks-multi-user-automation-s40dmq
+cd android-mcp
+pip install -e ".[device]"
+```
+
+**2. Point it at adb**
+
+If you have Android platform-tools, adb is already on PATH and there is nothing
+to do. If you only have BlueStacks, it ships its own adb under a different name:
+
+```powershell
+$env:ANDROID_MCP_ADB = "C:\Program Files\BlueStacks_nxt\HD-Adb.exe"
+```
+
+**3. Attach a device**
+
+BlueStacks: **Settings -> Advanced -> Android Debug Bridge**, turn it on. It
+shows a port. Phone: enable USB debugging and plug it in, then accept the prompt
+on the phone.
+
+**4. Check it works**
+
+```powershell
+android-mcp-selfcheck
+```
+
+This is the important step. It walks the whole stack and tells you exactly what
+works and what does not, in plain language, stopping at the first real problem.
+Do not skip it — nothing here has run against real hardware yet, so this is how
+you find out what holds on your setup.
+
+**5. Connect it to Claude Code**
+
+```powershell
+claude mcp add android -- android-mcp
+```
+
+Then ask Claude to `list_android_devices` and `read_screen`. If those two work,
+everything else is built on them.
+
 ## Why it is shaped like this
 
 **The screen is data, not a picture.** The obvious design exposes `tap(x, y)` and

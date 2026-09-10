@@ -19,6 +19,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 ADB_TIMEOUT = 20.0
 
@@ -95,14 +96,49 @@ def bluestacks_ports(count: int = 10) -> list[int]:
     ]
 
 
-def _adb_path() -> str:
-    path = shutil.which("adb")
-    if not path:
-        raise DeviceError(
-            "adb is not on PATH. Install platform-tools, or for BlueStacks use "
-            "the adb.exe shipped in its install directory."
-        )
-    return path
+# BlueStacks ships its own adb under a different name and does not put it on
+# PATH, so looking only for "adb" fails on a machine that has a working setup.
+ADB_ENV_VAR = "ANDROID_MCP_ADB"
+ADB_CANDIDATES = (
+    "adb",
+    "adb.exe",
+    "HD-Adb.exe",  # BlueStacks 5
+    r"C:\Program Files\BlueStacks_nxt\HD-Adb.exe",
+    r"C:\Program Files (x86)\BlueStacks_nxt\HD-Adb.exe",
+    r"C:\Program Files\BlueStacks\HD-Adb.exe",
+)
+
+
+def _adb_path(env=None, which=None, exists=None) -> str:
+    """Find adb: an explicit override first, then PATH, then where BlueStacks puts it."""
+    import os
+
+    env = env if env is not None else os.environ
+    which = which or shutil.which
+    exists = exists or (lambda p: Path(p).is_file())
+
+    override = (env.get(ADB_ENV_VAR) or "").strip()
+    if override:
+        if not (exists(override) or which(override)):
+            raise DeviceError(
+                f"{ADB_ENV_VAR} points at {override!r}, which is not an "
+                "executable file. Fix it or unset it."
+            )
+        return override
+
+    for candidate in ADB_CANDIDATES:
+        found = which(candidate)
+        if found:
+            return found
+        if candidate.endswith(".exe") and exists(candidate):
+            return candidate
+
+    raise DeviceError(
+        "could not find adb. Either install Android platform-tools and put adb "
+        f"on PATH, or set {ADB_ENV_VAR} to the full path of an adb binary. "
+        "BlueStacks ships one as HD-Adb.exe, usually at "
+        r"C:\Program Files\BlueStacks_nxt\HD-Adb.exe."
+    )
 
 
 def adb(*args: str, timeout: float = ADB_TIMEOUT) -> str:

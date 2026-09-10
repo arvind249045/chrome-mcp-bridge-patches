@@ -3,11 +3,13 @@
 import pytest
 
 from android_mcp.device import (
+    ADB_ENV_VAR,
     BLUESTACKS_FIRST_PORT,
     AndroidDevice,
     DeviceError,
     DeviceInfo,
     DeviceRegistry,
+    _adb_path,
     bluestacks_ports,
     parse_adb_devices,
 )
@@ -162,3 +164,45 @@ def test_the_registry_holds_no_current_device():
     """The bug the parent repo exists to patch, in its device-shaped form."""
     public = {name for name in vars(DeviceRegistry) if not name.startswith("_")}
     assert public == {"get", "put", "forget", "resolve"}
+
+
+# --- finding adb ---------------------------------------------------------
+
+
+def test_plain_adb_on_path_is_used():
+    found = _adb_path(env={}, which=lambda c: "/usr/bin/adb" if c == "adb" else None)
+    assert found == "/usr/bin/adb"
+
+
+def test_the_env_override_wins():
+    found = _adb_path(
+        env={ADB_ENV_VAR: "/custom/adb"},
+        which=lambda c: "/usr/bin/adb",
+        exists=lambda p: p == "/custom/adb",
+    )
+    assert found == "/custom/adb"
+
+
+def test_a_bad_env_override_is_reported_rather_than_ignored():
+    with pytest.raises(DeviceError) as exc:
+        _adb_path(
+            env={ADB_ENV_VAR: "/nope/adb"},
+            which=lambda c: None,
+            exists=lambda p: False,
+        )
+    assert ADB_ENV_VAR in str(exc.value)
+
+
+def test_bluestacks_adb_is_found_even_though_it_is_named_differently():
+    """BlueStacks ships HD-Adb.exe and does not put it on PATH."""
+    installed = r"C:\Program Files\BlueStacks_nxt\HD-Adb.exe"
+    found = _adb_path(env={}, which=lambda c: None, exists=lambda p: p == installed)
+    assert found == installed
+
+
+def test_no_adb_anywhere_explains_both_fixes():
+    with pytest.raises(DeviceError) as exc:
+        _adb_path(env={}, which=lambda c: None, exists=lambda p: False)
+    message = str(exc.value)
+    assert "platform-tools" in message and ADB_ENV_VAR in message
+    assert "HD-Adb.exe" in message
