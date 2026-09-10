@@ -3,8 +3,9 @@
 An MCP server for driving an Android device or a BlueStacks instance, built so a
 model can work the screen cheaply and without guessing.
 
-Two layers: primitives for reading and acting on the screen, and recorded flows
-that replay a path through an app deterministically, with no model in the loop.
+Three layers: primitives for reading and acting on the screen, recorded flows
+that replay a path through an app deterministically, and user-profile
+provisioning so a fresh profile is one command instead of ten minutes.
 
 ## Why it is shaped like this
 
@@ -121,6 +122,15 @@ Recording and replay:
 | `run_flow` | Replay a flow and report what each step did |
 | `delete_flow` | Delete a saved flow |
 
+User profiles:
+
+| Tool | What it does |
+| --- | --- |
+| `list_users` | The device's profiles, or one profile's installed apps |
+| `provision_user` | Create a profile and add apps to it in one step |
+| `switch_user` | Switch the device to a profile |
+| `remove_user` | Delete a profile and its data |
+
 Prefer `text`, `resource_id` or `desc` over `index`. Text matching is
 case-insensitive and partial; an exact label beats a partial one and a tappable
 match beats an inert one, so the common ambiguities resolve themselves. Genuine
@@ -181,17 +191,45 @@ anchor labels chosen to avoid anything with a number in it, so a cart total or a
 delivery estimate never becomes the thing replay depends on. If the screen in
 front of a step is not the one it was recorded on, the step fails before acting.
 
+## User profiles
+
+Setting a profile up by hand is slow mostly because every app downloads again.
+It does not have to: the APK is already on the device, so adding it to another
+profile is a link rather than a download. That is what `pm install-existing`
+does, and what `provision_user` is built around.
+
+```
+list_users(user_id=0)                      # what is installed for the owner
+provision_user(name="Testing",
+               packages=["com.bistro.app"])
+switch_user(user_id=13)
+```
+
+Packages are all validated before the profile is created, so a typo fails
+without leaving a half-built profile behind; an app that cannot be added is
+reported without discarding the rest, because one missing app is no reason to
+throw away a profile that is otherwise ready. Nothing switches profile unless
+asked, and `remove_user` refuses user 0 — removing the device owner is not a
+profile operation.
+
+These go through raw adb rather than uiautomator2, whose agent lives inside one
+user while the point here is to act on the others. Note that `read_screen` and
+everything else only ever sees the *current* profile, so switch before driving a
+newly provisioned one.
+
 ## Tests
 
 ```bash
 pytest
 ```
 
-196 tests, none needing a device. The parsing, selector-ranking and flow logic is
-pure functions; the action layer and the replay engine run against a scripted
-fake device and a fake clock; the MCP tools are driven end-to-end through
-`call_tool`, including a record-save-replay round trip. The server tests skip if
-the MCP SDK is not installed, so the core suite runs anywhere.
+247 tests, none needing a device. The parsing, selector-ranking, flow and `pm`
+output logic is pure functions; the action layer and replay engine run against a
+scripted fake device and a fake clock; profile operations run against a fake adb
+shell that records what it was asked to run; and the MCP tools are driven
+end-to-end through `call_tool`, including a record-save-replay round trip. The
+server tests skip if the MCP SDK is not installed, so the core suite runs
+anywhere.
 
 ## Status
 
@@ -199,9 +237,15 @@ Every layer is covered by tests, but none of it has run against a physical devic
 or a live BlueStacks instance yet — there is no Android available where this was
 built. The untested seams are the ones that touch hardware: uiautomator2's
 `dump_hierarchy` output on a real app versus the fixtures here, IME behaviour for
-`type_text`, and how stable `resource_id`s actually are across real app updates,
-which is the assumption the whole selector ranking rests on. Expect to adjust
-that ranking once there is evidence.
+`type_text`, the exact `pm` output formats across Android versions, and how
+stable `resource_id`s actually are across real app updates, which is the
+assumption the whole selector ranking rests on. Expect to adjust that ranking
+once there is evidence.
+
+Worth knowing before the first run: BlueStacks images vary in whether they
+support multiple users at all, and some ship with `pm create-user` disabled, in
+which case `provision_user` will report the device's own refusal. A physical
+OnePlus is the more likely place for the profile tools to earn their keep.
 
 ## Scope
 

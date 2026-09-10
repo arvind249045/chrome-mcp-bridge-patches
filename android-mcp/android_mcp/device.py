@@ -141,6 +141,19 @@ def connect_bluestacks(count: int = 10) -> list[DeviceInfo]:
     return list_devices()
 
 
+def shell_runner(serial: str):
+    """A callable running ``adb -s <serial> shell ...``.
+
+    Profile management goes through raw adb rather than uiautomator2: its agent
+    runs inside one user, and the point here is to act on the others.
+    """
+
+    def run(*args: str) -> str:
+        return adb("-s", serial, "shell", *args)
+
+    return run
+
+
 class AndroidDevice:
     """Adapter over one uiautomator2 connection.
 

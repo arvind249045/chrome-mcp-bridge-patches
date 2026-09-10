@@ -21,11 +21,18 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from . import actions, player
+from . import actions, player, users
 from .actions import ActionError, Selector, Snapshot
-from .device import DeviceError, DeviceRegistry, connect_bluestacks, list_devices
+from .device import (
+    DeviceError,
+    DeviceRegistry,
+    connect_bluestacks,
+    list_devices,
+    shell_runner,
+)
 from .flows import FlowError, FlowStore
 from .recorder import Recorder
+from .users import UserError
 
 try:  # pragma: no cover - import shape differs across SDK majors
     from mcp.server.mcpserver import Image, MCPServer
@@ -75,12 +82,17 @@ def build_server(
     store = FlowStore(flow_dir)
     recorder = Recorder()
 
-    def device_for(serial: str | None):
+    def serial_for(serial: str | None) -> str:
         try:
-            resolved = registry.resolve(serial, list_devices())
+            return registry.resolve(serial, list_devices())
         except DeviceError as exc:
             raise ToolError(str(exc)) from exc
-        return registry.get(resolved)
+
+    def device_for(serial: str | None):
+        return registry.get(serial_for(serial))
+
+    def shell_for(serial: str | None):
+        return shell_runner(serial_for(serial))
 
     def selector(
         index: int | None,
@@ -475,6 +487,89 @@ def build_server(
         except FlowError as exc:
             raise ToolError(str(exc)) from exc
         return f"deleted {name!r}"
+
+    # --- user profiles -------------------------------------------------
+
+    @server.tool()
+    def list_users(user_id: int | None = None, serial: str | None = None) -> str:
+        """List the device's user profiles, or one profile's installed apps.
+
+        Without user_id: every profile, its id, name, whether it is running, and
+        its flags. With user_id: the third-party packages installed in that
+        profile, which is how you find the package names to pass to
+        provision_user. Use 0 for the device owner.
+        """
+        run = shell_for(serial)
+        try:
+            if user_id is not None:
+                packages = users.packages_for(run, user_id)
+                if not packages:
+                    return f"profile {user_id} has no third-party apps installed"
+                return "\n".join(packages)
+            found = users.list_users(run)
+        except (UserError, DeviceError) as exc:
+            raise ToolError(str(exc)) from exc
+        if not found:
+            return (
+                "no profiles reported. The device may not allow multiple users, "
+                "or adb may lack permission to list them."
+            )
+        return "\n".join(u.render() for u in found)
+
+    @server.tool()
+    def provision_user(
+        name: str,
+        packages: list[str] | None = None,
+        switch: bool = False,
+        serial: str | None = None,
+    ) -> str:
+        """Create a user profile and add apps to it in one step.
+
+        The slow part of setting up a profile by hand is waiting for every app to
+        download again. This uses pm install-existing, so an app already on the
+        device is added to the new profile without downloading anything.
+
+        Pass package names from list_users(user_id=0). Every package is checked
+        before the profile is created, so a typo does not leave a half-built
+        profile behind; an app that cannot be added is reported without
+        discarding the rest. Nothing switches to the new profile unless you ask.
+        """
+        run = shell_for(serial)
+        try:
+            result = users.provision(
+                run, name, packages or [], switch=switch
+            )
+        except (UserError, DeviceError) as exc:
+            raise ToolError(str(exc)) from exc
+        return result.render()
+
+    @server.tool()
+    def switch_user(user_id: int, serial: str | None = None) -> str:
+        """Switch the device to a user profile.
+
+        The foreground app and everything read_screen sees belongs to whichever
+        profile is current, so switch before driving a newly provisioned one.
+        """
+        run = shell_for(serial)
+        try:
+            users.switch_user(run, user_id)
+        except (UserError, DeviceError) as exc:
+            raise ToolError(str(exc)) from exc
+        return f"switched to user {user_id}"
+
+    @server.tool()
+    def remove_user(user_id: int, serial: str | None = None) -> str:
+        """Delete a user profile and everything in it.
+
+        Not reversible: the profile's apps, accounts and data go with it. User 0
+        is the device owner and is refused.
+        """
+        run = shell_for(serial)
+        try:
+            users.remove_user(run, user_id)
+        except (UserError, DeviceError) as exc:
+            raise ToolError(str(exc)) from exc
+        return f"removed user {user_id}"
 
     return server
 

@@ -110,6 +110,11 @@ async def test_every_tool_is_registered(harness):
         "list_flows",
         "run_flow",
         "delete_flow",
+        # user profiles
+        "list_users",
+        "provision_user",
+        "switch_user",
+        "remove_user",
     }
 
 
@@ -398,3 +403,116 @@ async def test_deleting_a_flow(harness, tmp_path):
     assert "deleted" in await call(server, "delete_flow", name="login")
     assert "no flows saved yet" in await call(server, "list_flows")
     assert "no flow called" in await call_failing(server, "delete_flow", name="login")
+
+
+# --- user profiles, end to end -------------------------------------------
+
+
+@pytest.fixture
+def user_harness(monkeypatch, tmp_path):
+    """A server whose adb shell is a fake, for the profile tools."""
+    from test_users import PM_LIST_USERS, FakeShell
+
+    def build(**replies):
+        defaults = {
+            "pm list users": PM_LIST_USERS,
+            "pm create-user": "Success: created user id 13",
+            "pm remove-user": "Success: removed user",
+            "pm install-existing": "installed for user: 13",
+            "pm list packages": "package:com.bistro.app\npackage:com.fampay.app",
+        }
+        defaults.update(replies)
+        fake = FakeShell(defaults)
+        monkeypatch.setattr(
+            server_module,
+            "list_devices",
+            lambda: [DeviceInfo(SERIAL, "device")],
+        )
+        monkeypatch.setattr(server_module, "shell_runner", lambda serial: fake)
+        return server_module.build_server(flow_dir=tmp_path), fake
+
+    return build
+
+
+@pytest.mark.anyio
+async def test_listing_profiles(user_harness):
+    server, _ = user_harness()
+    text = await call(server, "list_users")
+    assert "Owner" in text and "Work profile" in text
+    assert "running" in text
+
+
+@pytest.mark.anyio
+async def test_listing_a_profiles_apps(user_harness):
+    server, fake = user_harness()
+    text = await call(server, "list_users", user_id=0)
+    assert "com.bistro.app" in text
+    assert fake.ran("pm list packages --user 0")
+
+
+@pytest.mark.anyio
+async def test_provisioning_a_profile(user_harness):
+    server, fake = user_harness()
+    text = await call(
+        server,
+        "provision_user",
+        name="Testing",
+        packages=["com.bistro.app", "com.fampay.app"],
+    )
+    assert "created as user 13" in text
+    assert fake.ran("pm create-user Testing")
+    assert fake.ran("pm install-existing --user 13 com.bistro.app")
+
+
+@pytest.mark.anyio
+async def test_provisioning_does_not_switch_by_default(user_harness):
+    server, fake = user_harness()
+    text = await call(server, "provision_user", name="Testing")
+    assert not fake.ran("am switch-user")
+    assert "switch_user" in text
+
+
+@pytest.mark.anyio
+async def test_provisioning_rejects_a_bad_package_before_creating_anything(
+    user_harness,
+):
+    server, fake = user_harness()
+    text = await call_failing(
+        server, "provision_user", name="Testing", packages=["not-a-package"]
+    )
+    assert "does not look like a package name" in text
+    assert not fake.ran("pm create-user")
+
+
+@pytest.mark.anyio
+async def test_provisioning_reports_the_max_users_limit(user_harness):
+    server, _ = user_harness(
+        **{
+            "pm create-user": "Error: couldn't create User.",
+            "pm get-max-users": "Maximum supported users: 4",
+        }
+    )
+    text = await call_failing(server, "provision_user", name="Testing")
+    assert "Maximum supported users: 4" in text
+
+
+@pytest.mark.anyio
+async def test_switching_profile(user_harness):
+    server, fake = user_harness()
+    assert "switched to user 11" in await call(server, "switch_user", user_id=11)
+    assert fake.ran("am switch-user 11")
+
+
+@pytest.mark.anyio
+async def test_removing_the_owner_is_refused(user_harness):
+    server, fake = user_harness()
+    text = await call_failing(server, "remove_user", user_id=0)
+    assert "device owner" in text
+    assert not fake.ran("pm remove-user")
+
+
+@pytest.mark.anyio
+async def test_removing_a_profile(user_harness):
+    server, fake = user_harness()
+    assert "removed user 11" in await call(server, "remove_user", user_id=11)
+    assert fake.ran("pm remove-user 11")
